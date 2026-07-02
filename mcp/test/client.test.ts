@@ -1,0 +1,116 @@
+import { describe, expect, it, vi } from "vitest";
+import { ClimbxClient, ClimbxError } from "../src/client.js";
+import { findUrlInText, validateImageUrls, validateIsoDate } from "../src/tools.js";
+
+function jsonResponse(status: number, body: unknown, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json", ...headers },
+  });
+}
+
+function makeClient(fetchFn: typeof fetch) {
+  const sleeps: number[] = [];
+  const client = new ClimbxClient({
+    apiKey: "climbx_sk_test",
+    fetchFn,
+    sleepFn: async (ms) => {
+      sleeps.push(ms);
+    },
+  });
+  return { client, sleeps };
+}
+
+describe("ClimbxClient", () => {
+  it("sends auth header and query params, returns parsed JSON", async () => {
+    const fetchFn = vi.fn(async (url: any, init: any) => {
+      expect(String(url)).toBe("https://climbx.so/api/v1/posts?limit=10");
+      expect(init.headers.Authorization).toBe("Bearer climbx_sk_test");
+      return jsonResponse(200, { posts: [] });
+    });
+    const { client } = makeClient(fetchFn as unknown as typeof fetch);
+    await expect(client.get("/posts", { limit: 10 })).resolves.toEqual({ posts: [] });
+  });
+
+  it("maps API errors to ClimbxError with code and hint", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(402, { error: "subscription_required", message: "No active plan." }),
+    );
+    const { client } = makeClient(fetchFn as unknown as typeof fetch);
+    const err = await client.get("/voice").catch((e) => e);
+    expect(err).toBeInstanceOf(ClimbxError);
+    expect(err.status).toBe(402);
+    expect(err.code).toBe("subscription_required");
+    expect(err.hint).toContain("subscription");
+  });
+
+  it("retries a rate-limited GET once, honoring Retry-After", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(
+        jsonResponse(429, { error: "rate_limited", message: "Slow down." }, { "Retry-After": "2" }),
+      )
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const { client, sleeps } = makeClient(fetchFn as unknown as typeof fetch);
+    await expect(client.get("/analytics")).resolves.toEqual({ ok: true });
+    expect(sleeps).toEqual([2000]);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up after the second rate-limit response", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(429, { error: "rate_limited", message: "Slow down." }, { "Retry-After": "1" }),
+    );
+    const { client } = makeClient(fetchFn as unknown as typeof fetch);
+    const err = await client.get("/analytics").catch((e) => e);
+    expect(err.code).toBe("rate_limited");
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it("never retries a write, even on daily cap", async () => {
+    const fetchFn = vi.fn(async () =>
+      jsonResponse(429, { error: "daily_post_cap_reached", message: "Cap reached." }),
+    );
+    const { client } = makeClient(fetchFn as unknown as typeof fetch);
+    const err = await client.post("/posts", { text: "hi" }).catch((e) => e);
+    expect(err.code).toBe("daily_post_cap_reached");
+    expect(err.hint).toContain("00:00 UTC");
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries a GET once on network error, but not writes", async () => {
+    const failing = vi.fn().mockRejectedValue(new TypeError("fetch failed"));
+    const { client: writeClient } = makeClient(failing as unknown as typeof fetch);
+    const writeErr = await writeClient.post("/posts", { text: "hi" }).catch((e) => e);
+    expect(writeErr.code).toBe("network_error");
+    expect(failing).toHaveBeenCalledTimes(1);
+
+    const flaky = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("fetch failed"))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const { client: readClient } = makeClient(flaky as unknown as typeof fetch);
+    await expect(readClient.get("/voice")).resolves.toEqual({ ok: true });
+    expect(flaky).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("local validation", () => {
+  it("finds URLs in post text", () => {
+    expect(findUrlInText("check https://example.com now")).toBe("https://example.com");
+    expect(findUrlInText("see www.example.com")).toBe("www.example.com");
+    expect(findUrlInText("no links here, just words. v2.0 shipped!")).toBeNull();
+  });
+
+  it("requires https image urls", () => {
+    expect(validateImageUrls(["https://img.example/a.png"])).toBeNull();
+    expect(validateImageUrls(["http://img.example/a.png"])).toContain("https");
+    expect(validateImageUrls(undefined)).toBeNull();
+  });
+
+  it("validates ISO datetimes", () => {
+    expect(validateIsoDate("2026-06-01T14:00:00Z", "scheduled_for")).toBeNull();
+    expect(validateIsoDate("not-a-date", "scheduled_for")).toContain("ISO 8601");
+    expect(validateIsoDate(undefined, "start")).toBeNull();
+  });
+});
