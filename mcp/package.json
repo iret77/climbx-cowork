@@ -16,7 +16,8 @@
     "build": "tsc",
     "test": "vitest run",
     "smoke": "tsx test/smoke.ts",
-    "start": "node dist/index.js"
+    "start": "node dist/index.js",
+    "bundle": "npm run build && npm prune --omit=dev && npx -y @anthropic-ai/mcpb pack . climbx-mcp.mcpb && npm ci"
   },
   "engines": {
     "node": ">=20"

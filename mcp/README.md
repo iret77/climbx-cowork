@@ -10,7 +10,20 @@ An [MCP](https://modelcontextprotocol.io) server for the [ClimbX](https://climbx
 - A ClimbX API key: create one in the app under **Settings → API** (the full key is shown only once)
 - Node.js ≥ 20
 
-## Setup
+## Install
+
+### Claude Desktop: one-click bundle (easiest)
+
+Build or download `climbx-mcp.mcpb`, then open it with Claude Desktop (double-click, or Settings > Extensions > drag it in). Claude Desktop asks for your ClimbX API key on install and stores it in the OS keychain. No terminal needed.
+
+To build the bundle from source:
+
+```bash
+npm install
+npm run bundle
+```
+
+### From source (Claude Code and other MCP clients)
 
 ```bash
 npm install
